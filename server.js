@@ -3,16 +3,21 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
 
-// Railway necesita un servidor HTTP para health checks
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Trivia Racer server OK');
 });
 
 const wss = new WebSocket.Server({ server });
-
 const rooms = {};
 const ROOM_TTL = 4 * 60 * 60 * 1000;
+
+// safeSend definido PRIMERO antes de todo
+function safeSend(ws, data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(JSON.stringify(data)); } catch(e) {}
+  }
+}
 
 setInterval(() => {
   const now = Date.now();
@@ -37,7 +42,7 @@ wss.on('connection', ws => {
       const code = msg.code;
       rooms[code] = { hostWs: ws, clients: new Map(), open: true, ts: Date.now() };
       ws._id = 'host'; ws._room = code; ws._role = 'host';
-      ws.send(JSON.stringify({ type: 'host-ready', code }));
+      safeSend(ws, { type: 'host-ready', code });
       console.log(`[ROOM] Creada: ${code}`);
       return;
     }
@@ -52,7 +57,7 @@ wss.on('connection', ws => {
       const { code, clientId } = msg;
       const room = rooms[code];
       if (!room || !room.open) {
-        ws.send(JSON.stringify({ type: 'error', reason: 'Sala no encontrada o cerrada' }));
+        safeSend(ws, { type: 'error', reason: 'Sala no encontrada o cerrada' });
         return;
       }
       room.clients.set(clientId, ws);
