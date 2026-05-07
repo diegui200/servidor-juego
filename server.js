@@ -12,10 +12,16 @@ const wss = new WebSocket.Server({ server });
 const rooms = {};
 const ROOM_TTL = 4 * 60 * 60 * 1000;
 
-// safeSend definido PRIMERO antes de todo
 function safeSend(ws, data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     try { ws.send(JSON.stringify(data)); } catch(e) {}
+  }
+}
+
+// Relay raw string sin re-parsear (mucho más rápido para estados de juego)
+function safeRelay(ws, raw) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(raw); } catch(e) {}
   }
 }
 
@@ -24,7 +30,7 @@ setInterval(() => {
   for (const [code, room] of Object.entries(rooms)) {
     if (now - room.ts > ROOM_TTL) {
       delete rooms[code];
-      console.log(`[CLEAN] Sala ${code} eliminada por TTL`);
+      console.log(`[CLEAN] Sala ${code} eliminada`);
     }
   }
 }, 30 * 60 * 1000);
@@ -38,6 +44,7 @@ wss.on('connection', ws => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
+    // HOST crea sala
     if (msg.type === 'host-create') {
       const code = msg.code;
       rooms[code] = { hostWs: ws, clients: new Map(), open: true, ts: Date.now() };
@@ -47,12 +54,14 @@ wss.on('connection', ws => {
       return;
     }
 
+    // HOST heartbeat
     if (msg.type === 'host-ping') {
       const room = rooms[msg.code];
       if (room) room.ts = Date.now();
       return;
     }
 
+    // CLIENT se une
     if (msg.type === 'client-join') {
       const { code, clientId } = msg;
       const room = rooms[code];
@@ -67,25 +76,39 @@ wss.on('connection', ws => {
       return;
     }
 
+    // HOST → clientes: relay
     if (msg.type === 'host-to-client') {
       const room = rooms[ws._room];
       if (!room) return;
+      // Para broadcasts de estado de juego, relay raw del data directamente
+      const dataStr = JSON.stringify(msg.data);
       if (msg.to === 'all') {
-        room.clients.forEach(cws => safeSend(cws, msg.data));
+        room.clients.forEach(cws => safeRelay(cws, dataStr));
       } else {
         const cws = room.clients.get(msg.to);
-        if (cws) safeSend(cws, msg.data);
+        if (cws) safeRelay(cws, dataStr);
       }
       return;
     }
 
+    // CLIENT → HOST: relay con _from
     if (msg.type === 'client-to-host') {
       const room = rooms[ws._room];
       if (!room) return;
-      safeSend(room.hostWs, Object.assign({}, msg.data, { _from: ws._id }));
+      // Para estados de juego (t:'s'), relay más eficiente
+      const d = msg.data;
+      if (d && d.t === 's') {
+        // Añadir _from inline sin crear objeto nuevo
+        safeRelay(room.hostWs, JSON.stringify(
+          Object.assign({}, d, { _from: ws._id })
+        ));
+      } else {
+        safeSend(room.hostWs, Object.assign({}, d, { _from: ws._id }));
+      }
       return;
     }
 
+    // HOST cierra sala
     if (msg.type === 'host-close') {
       const room = rooms[ws._room];
       if (!room) return;
